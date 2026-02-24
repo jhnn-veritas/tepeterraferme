@@ -1,0 +1,136 @@
+# --- VARIABLES ---
+variable "vpc_cidr" {
+  description = "Le bloc adresse du VPC"
+  type        = string
+  default     = "10.0.0.0/16"
+}
+variable "public_subnet_1_cidr" {
+  default = "10.0.1.0/24"
+}
+variable "public_subnet_2_cidr" {
+  default = "10.0.2.0/24"
+}
+variable "private_subnet_1_cidr" {
+  default = "10.0.3.0/24"
+}
+variable "private_subnet_2_cidr" {
+  default = "10.0.4.0/24"
+}
+
+# --- LE VPC ---
+resource "aws_vpc" "mon_vpc_tp" {
+  cidr_block           = var.vpc_cidr
+  enable_dns_support   = true
+  enable_dns_hostnames = true 
+  tags = {
+    Name = "mon-vpc-cesi"
+  }
+}
+
+# ==========================================
+# LES SOUS-RÉSEAUX PUBLICS (Pour le Load Balancer)
+# ==========================================
+resource "aws_subnet" "public_1" {
+  vpc_id                  = aws_vpc.mon_vpc_tp.id
+  cidr_block              = var.public_subnet_1_cidr
+  availability_zone       = "us-east-1a"
+  map_public_ip_on_launch = true # Donne une IP publique automatiquement
+
+  tags = { Name = "Subnet-Public-1-AZa" }
+}
+
+resource "aws_subnet" "public_2" {
+  vpc_id                  = aws_vpc.mon_vpc_tp.id
+  cidr_block              = var.public_subnet_2_cidr
+  availability_zone       = "us-east-1b" # Zone B ! Indispensable pour la haute dispo
+  map_public_ip_on_launch = true
+
+  tags = { Name = "Subnet-Public-2-AZb" }
+}
+
+# ==========================================
+# LES SOUS-RÉSEAUX PRIVÉS (Pour tes 2 serveurs Web)
+# ==========================================
+resource "aws_subnet" "private_1" {
+  vpc_id            = aws_vpc.mon_vpc_tp.id
+  cidr_block        = var.private_subnet_1_cidr
+  availability_zone = "us-east-1a"
+
+  tags = { Name = "Subnet-Prive-1-AZa" }
+}
+
+resource "aws_subnet" "private_2" {
+  vpc_id            = aws_vpc.mon_vpc_tp.id
+  cidr_block        = var.private_subnet_2_cidr
+  availability_zone = "us-east-1b"
+
+  tags = { Name = "Subnet-Prive-2-AZb" }
+}
+
+# ==========================================
+# LES PORTES DE SORTIE (IGW et NAT)
+# ==========================================
+# INTERNET GATEWAY (Porte principale)
+resource "aws_internet_gateway" "mon_igw" {
+  vpc_id = aws_vpc.mon_vpc_tp.id
+  tags   = { Name = "mon-igw" }
+}
+
+# IP FIXE POUR LA NAT GATEWAY
+resource "aws_eip" "nat_ip" {
+  domain = "vpc"
+  tags   = { Name = "IP-NAT-GW" }
+}
+
+# NAT GATEWAY (Pour que les serveurs privés puissent se mettre à jour)
+resource "aws_nat_gateway" "ma_nat_gw" {
+  allocation_id = aws_eip.nat_ip.id
+  subnet_id     = aws_subnet.public_1.id # La NAT doit être dans un subnet public !
+
+  tags = { Name = "ma-nat-gw" }
+  depends_on = [aws_internet_gateway.mon_igw] # On attend que l'IGW soit prête
+}
+
+# ==========================================
+# LES TABLES DE ROUTAGE (Les panneaux indicateurs)
+# ==========================================
+
+# 1. TABLE PUBLIQUE (Envoie le trafic vers l'IGW)
+resource "aws_route_table" "rt_publique" {
+  vpc_id = aws_vpc.mon_vpc_tp.id
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.mon_igw.id
+  }
+  tags = { Name = "Table-Routage-Publique" }
+}
+
+# On associe la table publique aux 2 subnets publics
+resource "aws_route_table_association" "pub_1" {
+  subnet_id      = aws_subnet.public_1.id
+  route_table_id = aws_route_table.rt_publique.id
+}
+resource "aws_route_table_association" "pub_2" {
+  subnet_id      = aws_subnet.public_2.id
+  route_table_id = aws_route_table.rt_publique.id
+}
+
+# 2. TABLE PRIVÉE (Envoie le trafic vers la NAT Gateway)
+resource "aws_route_table" "rt_privee" {
+  vpc_id = aws_vpc.mon_vpc_tp.id
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.ma_nat_gw.id
+  }
+  tags = { Name = "Table-Routage-Privee" }
+}
+
+# On associe la table privée aux 2 subnets privés
+resource "aws_route_table_association" "priv_1" {
+  subnet_id      = aws_subnet.private_1.id
+  route_table_id = aws_route_table.rt_privee.id
+}
+resource "aws_route_table_association" "priv_2" {
+  subnet_id      = aws_subnet.private_2.id
+  route_table_id = aws_route_table.rt_privee.id
+}
